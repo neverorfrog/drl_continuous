@@ -182,9 +182,6 @@ class SAC:
     def value_learning_step(self, batch):
         observations, actions, rewards, dones, new_observations = batch
 
-        print(observations.device)
-        exit()
-
         self.value_optimizer1.zero_grad()
         self.value_optimizer2.zero_grad()
 
