@@ -146,7 +146,7 @@ class SAC:
         )
         action = self.select_action(observation).to(device)
         new_observation, reward, terminated, truncated, _ = self.env.step(
-            action.numpy()
+            action.cpu().numpy()
         )
         done = terminated or truncated
         new_observation = torch.as_tensor(
