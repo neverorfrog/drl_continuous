@@ -129,7 +129,7 @@ class ContinuousFrozenLake(Env):
 
         if self.num_steps >= self._max_episode_steps:
             terminated = True
-            reward = -50
+            reward = -200
             print("Max steps reached!")
 
         # Check for failure termination
