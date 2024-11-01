@@ -145,11 +145,11 @@ class DDPG:
             action += noise_weight * np.random.randn(
                 self.env_params["action_dim"]
             )
-            action = np.clip(
+            action = torch.clip(
                 action,
                 -self.env_params["action_bound"],
                 self.env_params["action_bound"],
-            )
+            ).to(device)
         return action
 
     def learning_step(self):
@@ -260,6 +260,9 @@ class DDPG:
 
     def populate_buffer(self):
         observation = self.env.reset()[0]
+        observation = torch.as_tensor(
+            observation, dtype=torch.float32
+        )  # the buffer expects tensors
         for _ in range(self.start_steps):
             with torch.no_grad():
                 action = self.select_action(observation, noise_weight=1)

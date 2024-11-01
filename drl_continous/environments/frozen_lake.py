@@ -8,7 +8,7 @@ from gymnasium.spaces import Box
 from pygame.image import load
 from pygame.transform import scale
 
-from drl_continous.utils import IMG_DIR, parse_map_grid
+from drl_continous.utils import IMG_DIR, Q_DIR, parse_map_grid
 from drl_continous.utils.definitions import RewardType
 
 SEED = 111
@@ -95,7 +95,7 @@ class ContinuousFrozenLake(Env):
         if self.is_rendered:
             self.init_pygame()
 
-        self.complete_Q = np.load(f"data/q_tables_{map_name}.npz")[
+        self.complete_Q = np.load(f"{Q_DIR}/q_tables_{map_name}.npz")[
             "q_table_a1"
         ]
         self.Q = self.complete_Q[self.goal_idx :: 2, :]
@@ -142,7 +142,7 @@ class ContinuousFrozenLake(Env):
 
         return reward, terminated
 
-    def step(self, action):
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, dict]:
         """
         The agent takes a step in the environment.
         """

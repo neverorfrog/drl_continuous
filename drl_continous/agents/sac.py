@@ -113,7 +113,7 @@ class SAC:
         self.rewards = deque(maxlen=self.window)
 
         # Populating the experience replay memory
-        self.populate_buffer()
+        self.memory.populate(self.env, self.start_steps)
 
         while self.training:
             # ep stats
@@ -134,27 +134,37 @@ class SAC:
 
             self.episode_update()
 
-    def interaction_step(self, observation) -> tuple:
+    def interaction_step(self, observation: np.ndarray) -> tuple:
         """
         Function responsible for the interaction of the agent with the
         environment. The action is selected by the policy network, then
-        performed and the results stored in the replay buffer.
+        performed and the results stored in the replay buffer. It expects a
+        numpy array as input.
         """
-        action = self.select_action(observation)
+        observation = torch.as_tensor(observation, dtype=torch.float32).to(
+            device
+        )
+        action = self.select_action(observation).to(device)
         new_observation, reward, terminated, truncated, _ = self.env.step(
-            action
+            action.cpu().numpy()
         )
         done = terminated or truncated
+        new_observation = torch.as_tensor(
+            new_observation, dtype=torch.float32
+        ).to(
+            device
+        )  # buffer expects tensor
         self.memory.store(observation, action, reward, done, new_observation)
         self.ep_reward += reward
         return new_observation, done
 
-    def select_action(self, observation) -> np.ndarray:
+    def select_action(self, observation: torch.Tensor) -> torch.Tensor:
+        """
+        This function selects an action from the policy network. It expects
+        to receive a tensor in input.
+        """
         with torch.no_grad():
-            action, _ = self.actor(
-                torch.as_tensor(observation, dtype=torch.float32),
-                with_logprob=False,
-            )
+            action, _ = self.actor(observation, with_logprob=False)
         return action
 
     def learning_step(self) -> bool:
@@ -171,6 +181,7 @@ class SAC:
 
     def value_learning_step(self, batch):
         observations, actions, rewards, dones, new_observations = batch
+
         self.value_optimizer1.zero_grad()
         self.value_optimizer2.zero_grad()
 
@@ -304,21 +315,6 @@ class SAC:
         if render:
             print("Mean Reward: ", mean_reward)
         return mean_reward
-
-    def populate_buffer(self):
-        observation = self.env.reset()[0]
-        for _ in range(self.start_steps):
-            action = self.env.action_space.sample()
-            new_observation, reward, terminated, truncated, _ = self.env.step(
-                action
-            )
-            done = terminated or truncated
-            self.memory.store(
-                observation, action, reward, done, new_observation
-            )
-            observation = new_observation
-            if terminated or truncated:
-                observation = self.env.reset()[0]
 
     def save(self):
         here = os.path.dirname(os.path.abspath(__file__))
