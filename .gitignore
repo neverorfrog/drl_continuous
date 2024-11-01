@@ -146,9 +146,6 @@ cython_debug/
 # VS Code
 .vscode/
 
-# Data
-data/
-
 #episodes
 episodes/
 
