@@ -145,11 +145,11 @@ class DDPG:
             action += noise_weight * np.random.randn(
                 self.env_params["action_dim"]
             )
-            action = np.clip(
+            action = torch.clip(
                 action,
                 -self.env_params["action_bound"],
                 self.env_params["action_bound"],
-            )
+            ).to(device)
         return action
 
     def learning_step(self):

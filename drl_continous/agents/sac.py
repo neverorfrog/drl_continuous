@@ -149,12 +149,12 @@ class SAC:
         self.ep_reward += reward
         return new_observation, done
 
-    def select_action(self, observation) -> np.ndarray:
+    def select_action(self, observation) -> torch.Tensor:
         with torch.no_grad():
             action, _ = self.actor(
                 torch.as_tensor(observation, dtype=torch.float32),
                 with_logprob=False,
-            )
+            ).to(device)
         return action
 
     def learning_step(self) -> bool:
