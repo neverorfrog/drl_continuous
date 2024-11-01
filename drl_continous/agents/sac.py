@@ -133,6 +133,8 @@ class SAC:
                 self.num_steps += 1
 
             self.episode_update()
+            if self.ep % 200 == 0:
+                self.save()
 
     def interaction_step(self, observation: np.ndarray) -> tuple:
         """

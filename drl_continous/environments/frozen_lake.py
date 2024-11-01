@@ -117,7 +117,7 @@ class ContinuousFrozenLake(Env):
         # Check for successful termination
         if self.is_inside_cell(obs, self.goal):
             print("GOAL REACHED!")
-            reward = 100
+            reward = 500
             self.old_goal = self.goal
             self.goal_idx += 1
             if self.goal_idx == self.num_goals:
