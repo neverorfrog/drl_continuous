@@ -57,6 +57,7 @@ class SquashedGaussianActor(nn.Module):
         )
 
     def forward(self, obs, deterministic=False, with_logprob=True):
+        obs = obs.to(device)
         output = self.pi(obs)
         mu = self.mu_layer(output)
         log_std = self.log_std_layer(output)
@@ -97,4 +98,6 @@ class Critic(nn.Module):
         self.q = network(dimensions, activation)
 
     def forward(self, obs, act):
+        obs = obs.to(device)
+        act = act.to(device)
         return self.q(torch.cat([obs, act], dim=-1))
