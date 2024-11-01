@@ -301,7 +301,7 @@ class SAC:
                         observation, deterministic=True, with_logprob=False
                     )
                 observation, reward, terminated, truncated, _ = env.step(
-                    action
+                    action.cpu().numpy()
                 )
                 observation = torch.FloatTensor(observation)
                 total_reward += reward
@@ -341,17 +341,23 @@ class SAC:
 
         self.actor.load_state_dict(
             torch.load(
-                open(os.path.join(path, "actor.pt"), "rb"), weights_only=True
+                open(os.path.join(path, "actor.pt"), "rb"),
+                weights_only=True,
+                map_location=device,
             )
         )
         self.critic1.load_state_dict(
             torch.load(
-                open(os.path.join(path, "critic1.pt"), "rb"), weights_only=True
+                open(os.path.join(path, "critic1.pt"), "rb"),
+                weights_only=True,
+                map_location=device,
             )
         )
         self.critic2.load_state_dict(
             torch.load(
-                open(os.path.join(path, "critic2.pt"), "rb"), weights_only=True
+                open(os.path.join(path, "critic2.pt"), "rb"),
+                weights_only=True,
+                map_location=device,
             )
         )
         print("MODELS LOADED!")
