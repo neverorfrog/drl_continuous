@@ -35,7 +35,7 @@ class StandardReplayBuffer:
                 device
             )  # buffer expects tensor
             new_observation, reward, terminated, truncated, _ = env.step(
-                action
+                action.cpu().numpy()
             )
             done = terminated or truncated
             new_observation = torch.as_tensor(
