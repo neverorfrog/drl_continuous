@@ -117,7 +117,7 @@ class ContinuousFrozenLake(Env):
         # Check for successful termination
         if self.is_inside_cell(obs, self.goal):
             print("GOAL REACHED!")
-            reward = 500
+            reward = 1000
             self.old_goal = self.goal
             self.goal_idx += 1
             if self.goal_idx == self.num_goals:
@@ -136,7 +136,7 @@ class ContinuousFrozenLake(Env):
         for hole in self.holes:
             if self.is_inside_cell(obs, hole):
                 terminated = True
-                reward = -10
+                reward = -100
                 print("Fell in the hole!")
                 break
 
