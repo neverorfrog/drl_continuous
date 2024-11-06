@@ -8,39 +8,45 @@ from gymnasium.spaces import Box
 from pygame.image import load
 from pygame.transform import scale
 
-from drl_continous.utils import IMG_DIR, Q_DIR, parse_map_grid
-from drl_continous.utils.definitions import RewardType
+from drl_continuous.utils import IMG_DIR, Q_DIR, parse_map_grid
+from drl_continuous.utils.definitions import RewardType
 
 SEED = 111
 
 MAPS = {
-    "6x6": [
-        "🟩 🟩 🟩 🟩 🟩 🟩",
-        "🟩 🟩 🟩 🟩 ⛔ 🟩",
-        "⛔ 🟩 🟩 🟩 ⛔ 🟩",
-        "🟩 ⛔ ⛔ ⛔ ⛔ 🟩",
-        "🟩 🟩 🟩 🟩 🟩 🟩",
-        "🟩 🟩 ⛔ ⛔ ⛔ 1 ",
-    ],
-    "island": [
+    "lab0": [
         "🟩 🟩 🟩 🟩 1",
-        "🟩 ⛔ ⛔ ⛔ 🟩",
-        "🟩 ⛔ ⛔ ⛔ 🟩",
-        "🟩 ⛔ ⛔ ⛔ 🟩",
-        "🟩 🟩 🟩 🟩 ⛔ ",
+        "🟩 ⛔ 🟩 🟩 🟩",
+        "🟩 ⛔ 🟩 🟩 🟩",
+        "🟩 ⛔ 🟩 🟩 🟩",
+        "🟩 ⛔ 🟩 🟩 🟩 ",
     ],
-    "lab": [
+    "lab1": [
+        "🟩 🟩 🟩 ⛔ 1",
+        "🟩 ⛔ 🟩 🟩 🟩",
+        "🟩 ⛔ 🟩 🟩 🟩",
+        "🟩 ⛔ 🟩 🟩 🟩",
+        "🟩 ⛔ 🟩 🟩 🟩 ",
+    ],
+    "lab2": [
         "🟩 🟩 🟩 ⛔ 1",
         "🟩 ⛔ 🟩 ⛔ 🟩",
         "🟩 ⛔ 🟩 🟩 🟩",
         "🟩 ⛔ 🟩 🟩 🟩",
         "🟩 ⛔ 🟩 🟩 🟩 ",
     ],
-    "barrier": [
-        "🟩 🟩 🟩 🟩 1",
+    "lab3": [
+        "🟩 🟩 🟩 ⛔ 1",
+        "🟩 ⛔ 🟩 ⛔ 🟩",
+        "🟩 ⛔ 🟩 ⛔ 🟩",
         "🟩 ⛔ 🟩 🟩 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩",
+        "🟩 ⛔ 🟩 🟩 🟩 ",
+    ],
+    "lab4": [
+        "🟩 🟩 🟩 ⛔ 1",
+        "🟩 ⛔ 🟩 ⛔ 🟩",
+        "🟩 ⛔ 🟩 ⛔ 🟩",
+        "🟩 ⛔ 🟩 ⛔ 🟩",
         "🟩 ⛔ 🟩 🟩 🟩 ",
     ],
 }
@@ -103,21 +109,25 @@ class ContinuousFrozenLake(Env):
     def reward_function(self, obs: np.ndarray) -> Tuple[float, bool]:
         terminated = False
         reward = 0
+        log = None
 
         if self.reward_type == RewardType.dense:
-            # Dense reward: negative distance to the goal
             goal_distance = np.linalg.norm(obs - self.grid2frame(self.goal))
             reward = 1 - goal_distance / self.max_distance
         elif self.reward_type == RewardType.model:
             cell = np.floor(self.frame2grid(obs)).astype(int)
             state = cell[1] * self.size + cell[0]
-            value = np.max(self.Q[state, :])
-            reward = value
+            reward = np.max(self.Q[state, :])
+
+        if self.num_steps >= self._max_episode_steps:
+            log = "MAX STEPS"
+            terminated = True
+            reward = -50
 
         # Check for successful termination
         if self.is_inside_cell(obs, self.goal):
-            print("GOAL REACHED!")
-            reward = 1000
+            log = "GOAL REACHED"
+            reward = 100
             self.old_goal = self.goal
             self.goal_idx += 1
             if self.goal_idx == self.num_goals:
@@ -127,20 +137,15 @@ class ContinuousFrozenLake(Env):
                 goal_key = list(self.goals.keys())[self.goal_idx]
                 self.goal = np.array(self.goals[goal_key])
 
-        if self.num_steps >= self._max_episode_steps:
-            terminated = True
-            reward = -200
-            print("Max steps reached!")
-
         # Check for failure termination
         for hole in self.holes:
             if self.is_inside_cell(obs, hole):
                 terminated = True
-                reward = -100
-                print("Fell in the hole!")
+                reward = -10
+                log = "HOLE"
                 break
 
-        return reward, terminated
+        return reward, terminated, log
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, dict]:
         """
@@ -162,19 +167,9 @@ class ContinuousFrozenLake(Env):
             )
 
         self.observation = np.array([new_x, new_y])
-        self.reward, terminated = self.reward_function(self.observation)
+        self.reward, terminated, log = self.reward_function(self.observation)
         self.num_steps += 1
-
-        if self.is_rendered:
-            self.render()
-            print("")
-            print("Previous observation: ", self.prev_observation)
-            print("Action: ", action)
-            print("Observation: ", self.observation)
-            print("Reward: ", self.reward)
-            print("")
-
-        return self.observation, self.reward, terminated, False, {}
+        return self.observation, self.reward, terminated, False, {"log": log}
 
     def reset(self) -> Tuple[np.ndarray, dict]:
         super().reset(seed=SEED)
@@ -189,8 +184,18 @@ class ContinuousFrozenLake(Env):
         """
         Check if a position is inside a cell.
         """
-        cell = self.grid2frame(cell)
-        return np.linalg.norm(pos - cell) <= 0.5
+        cell_coord = self.grid2frame(cell)
+        # inside = True
+        # if pos[0] < cell_coord[0] - 0.5: inside = False # left
+        # if pos[0] > cell_coord[0] + 0.5: inside = False # right
+        # if pos[1] < cell_coord[1] - 0.5: inside = False # bottom
+        # if pos[1] > cell_coord[1] + 0.5: inside = False # top
+
+        # if inside is True:
+        #     print(pos, cell_coord, cell)
+        #     print(inside)
+        #     print("---")
+        return np.linalg.norm(pos - cell_coord) < 0.5
 
     def frame2grid(self, frame_pos: np.ndarray) -> np.ndarray:
         """

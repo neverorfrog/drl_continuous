@@ -5,11 +5,6 @@ import torch.nn.functional as F
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Seed
-SEED = 0
-torch.manual_seed(SEED)
-np.random.seed(SEED)
-
 
 def network(sizes, activation, output_activation=nn.Identity):
     layers = []

@@ -8,8 +8,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from drl_continous.agents.buffer import StandardReplayBuffer
-from drl_continous.agents.networks import Actor, Critic
+from drl_continuous.agents.buffer import StandardReplayBuffer
+from drl_continuous.agents.networks import Actor, Critic
 
 # Seed
 SEED = 13
@@ -19,7 +19,7 @@ np.random.seed(SEED)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class DDPG:
+class TD3:
     def __init__(
         self,
         name,
@@ -28,14 +28,17 @@ class DDPG:
         polyak=1.0,
         pi_lr=0.0001,
         q_lr=0.0001,
-        target_update_freq=5,
-        update_freq=1,
+        target_update_freq=2,
+        value_update_freq=1,
         eps=1.0,
         eps_decay=0.99,
         batch_size=64,
         gamma=0.99,
         max_episodes=200,
         reward_threshold=100,
+        target_noise=0.2,
+        noise_clip=0.3,
+        policy_update_freq=2,
     ):
 
         # Hyperparameters
@@ -46,13 +49,16 @@ class DDPG:
         self.pi_lr = pi_lr
         self.q_lr = q_lr
         self.target_update_freq = target_update_freq
-        self.update_freq = update_freq
+        self.policy_update_freq = policy_update_freq
+        self.value_update_freq = value_update_freq
         self.eps = eps
         self.eps_decay = eps_decay
         self.batch_size = batch_size
         self.gamma = gamma
         self.max_episodes = max_episodes
         self.reward_threshold = reward_threshold
+        self.target_noise = target_noise
+        self.noise_clip = noise_clip
 
         # env params for networks and buffer
         observation = env.reset()[0]
@@ -65,18 +71,29 @@ class DDPG:
 
         # Networks
         self.actor: Actor = Actor(self.env_params).to(device)
-        self.target_actor: Actor = deepcopy(self.actor).to(device)
-        self.critic: Critic = Critic(self.env_params).to(device)
-        self.target_critic: Critic = deepcopy(self.critic).to(device)
+        self.critic1: Critic = Critic(self.env_params).to(device)
+        self.critic2: Critic = Critic(self.env_params).to(device)
+
         self.policy_optimizer = torch.optim.Adam(
             self.actor.parameters(), lr=pi_lr
         )
-        self.value_optimizer = torch.optim.Adam(
-            self.critic.parameters(), lr=q_lr
+        self.value_optimizer1 = torch.optim.Adam(
+            self.critic1.parameters(), lr=q_lr
+        )
+        self.value_optimizer2 = torch.optim.Adam(
+            self.critic2.parameters(), lr=q_lr
         )
         self.value_loss_fn = nn.MSELoss()
-        # These networks must be updated not through the gradients but with polyak
-        for param in self.target_critic.parameters():
+
+        self.target_actor: Actor = deepcopy(self.actor).to(device)
+        self.target_critic1: Critic = deepcopy(self.critic1).to(device)
+        self.target_critic2: Critic = deepcopy(self.critic2).to(device)
+
+        # Target networks must be updated not directly through the gradients but
+        # with polyak averaging
+        for param in self.target_critic1.parameters():
+            param.requires_grad = False
+        for param in self.target_critic2.parameters():
             param.requires_grad = False
         for param in self.target_actor.parameters():
             param.requires_grad = False
@@ -101,7 +118,7 @@ class DDPG:
         while self.training:
 
             # ep stats
-            steps = 0
+            num_steps = 0
             self.ep_reward = 0
             self.ep_mean_value_loss = 0.0
 
@@ -113,17 +130,9 @@ class DDPG:
 
             while not done:
                 new_observation, done = self.interaction_step(observation)
-
-                # Online network update
-                if steps % self.update_freq == 0:
-                    self.learning_step()
-
-                # Copying online network weights into target network
-                if steps % self.target_update_freq == 0:
-                    self.update_target_networks()
-
+                self.learning_step(num_steps)
                 observation = new_observation
-                steps += 1
+                num_steps += 1
 
             self.episode_update()
 
@@ -139,47 +148,99 @@ class DDPG:
         self.ep_reward += reward
         return new_observation, done
 
-    def select_action(self, obs, noise_weight=0.2):
+    def select_action(self, observation, noise_weight=0.2):
         with torch.no_grad():
-            action = self.actor(torch.as_tensor(obs, dtype=torch.float32))
+            action = self.actor(
+                torch.as_tensor(observation, dtype=torch.float32)
+            )
             action += noise_weight * np.random.randn(
                 self.env_params["action_dim"]
             )
-            action = torch.clip(
+            action = np.clip(
                 action,
                 -self.env_params["action_bound"],
                 self.env_params["action_bound"],
-            ).to(device)
+            )
         return action
 
-    def learning_step(self):
+    def estimate_best_actions(self, observations):
+        """
+        Estimate the best actions for given observations using the target actor
+        network with added noise for policy smoothing.
+
+        Args:
+            observations (numpy.ndarray or torch.Tensor): The input observations
+            for which to estimate actions.
+        Returns:
+            torch.Tensor: The estimated best actions with added noise, clipped
+            to the action bounds.
+        """
+        with torch.no_grad():
+            actions: torch.Tensor = self.target_actor(
+                torch.as_tensor(observations, dtype=torch.float32)
+            )
+            noise: torch.Tensor = torch.normal(
+                0, self.target_noise, size=actions.shape
+            )
+            noise = torch.clip(noise, -self.noise_clip, self.noise_clip)
+            actions = torch.clip(
+                actions + noise,
+                -self.env_params["action_bound"],
+                self.env_params["action_bound"],
+            )
+        return actions
+
+    def learning_step(self, num_steps):
         # Sampling of the minibatch
         batch = self.memory.sample(batch_size=self.batch_size)
+        if num_steps % self.value_update_freq == 0:
+            self.value_learning_step(batch)
+        if num_steps % self.policy_update_freq == 0:
+            self.policy_learning_step(batch)
+        if num_steps % self.target_update_freq == 0:
+            self.update_target_networks()
+
+    def value_learning_step(self, batch):
         observations, actions, rewards, dones, new_observations = batch
 
-        # Value Optimization
-        estimations = self.critic(observations, actions)
+        # Computation of value targets
         with torch.no_grad():
-            best_actions = self.target_actor(
+            best_actions = self.estimate_best_actions(
                 new_observations
-            )  # (batch_size, 1)
-            target_values = self.target_critic(new_observations, best_actions)
+            )  # (batch_size, action_dim)
+            target_values = torch.min(
+                self.target_critic1(new_observations, best_actions),
+                self.target_critic2(new_observations, best_actions),
+            )
             targets = rewards + (1 - dones) * self.gamma * target_values
-        value_loss: torch.Tensor = self.value_loss_fn(estimations, targets)
+
+        estimations1 = self.critic1(observations, actions)
+        estimations2 = self.critic2(observations, actions)
+        value_loss1: torch.Tensor = self.value_loss_fn(estimations1, targets)
+        value_loss2: torch.Tensor = self.value_loss_fn(estimations2, targets)
+
         self.ep_mean_value_loss += (1 / self.ep) * (
-            value_loss.item() - self.ep_mean_value_loss
+            value_loss1.item() - self.ep_mean_value_loss
         )
-        self.value_optimizer.zero_grad()
-        value_loss.backward()
-        self.value_optimizer.step()
+
+        self.value_optimizer1.zero_grad()
+        value_loss1.backward()
+        self.value_optimizer1.step()
+
+        self.value_optimizer2.zero_grad()
+        value_loss2.backward()
+        self.value_optimizer2.step()
+
+    def policy_learning_step(self, batch):
+        observations, _, _, _, _ = batch
 
         # Don't waste computational effort
-        for param in self.critic.parameters():
+        for param in self.critic1.parameters():
             param.requires_grad = False
 
         # Policy Optimization
         estimated_actions = self.actor(observations)
-        estimated_values: torch.Tensor = self.critic(
+        estimated_values: torch.Tensor = self.critic1(
             observations, estimated_actions
         )
         policy_loss: torch.Tensor = (
@@ -190,14 +251,20 @@ class DDPG:
         self.policy_optimizer.step()
 
         # Reactivate computational graph for critic
-        for param in self.critic.parameters():
+        for param in self.critic1.parameters():
             param.requires_grad = True
 
     def update_target_networks(self, polyak=None):
         polyak = self.polyak if polyak is None else polyak
         with torch.no_grad():
             for target, online in zip(
-                self.target_critic.parameters(), self.critic.parameters()
+                self.target_critic1.parameters(), self.critic1.parameters()
+            ):
+                target.data.mul(polyak)
+                target.data.add((1 - polyak) * online.data)
+
+            for target, online in zip(
+                self.target_critic2.parameters(), self.critic2.parameters()
             ):
                 target.data.mul(polyak)
                 target.data.add((1 - polyak) * online.data)
@@ -260,9 +327,6 @@ class DDPG:
 
     def populate_buffer(self):
         observation = self.env.reset()[0]
-        observation = torch.as_tensor(
-            observation, dtype=torch.float32
-        )  # the buffer expects tensors
         for _ in range(self.start_steps):
             with torch.no_grad():
                 action = self.select_action(observation, noise_weight=1)
@@ -287,8 +351,12 @@ class DDPG:
             self.actor.state_dict(), open(os.path.join(path, "actor.pt"), "wb")
         )
         torch.save(
-            self.critic.state_dict(),
-            open(os.path.join(path, "critic.pt"), "wb"),
+            self.critic1.state_dict(),
+            open(os.path.join(path, "critic1.pt"), "wb"),
+        )
+        torch.save(
+            self.critic2.state_dict(),
+            open(os.path.join(path, "critic2.pt"), "wb"),
         )
         print("MODELS SAVED!")
 
@@ -301,9 +369,14 @@ class DDPG:
                 open(os.path.join(path, "actor.pt"), "rb"), weights_only=True
             )
         )
-        self.critic.load_state_dict(
+        self.critic1.load_state_dict(
             torch.load(
-                open(os.path.join(path, "critic.pt"), "rb"), weights_only=True
+                open(os.path.join(path, "critic1.pt"), "rb"), weights_only=True
+            )
+        )
+        self.critic2.load_state_dict(
+            torch.load(
+                open(os.path.join(path, "critic2.pt"), "rb"), weights_only=True
             )
         )
         print("MODELS LOADED!")

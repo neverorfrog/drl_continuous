@@ -1,44 +1,44 @@
 import os
 from collections import deque
 from copy import deepcopy
-from typing import Optional
 
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
-from drl_continous.agents.buffer import StandardReplayBuffer
-from drl_continous.agents.networks import Actor, Critic
+import wandb
+from drl_continuous.agents.buffer import StandardReplayBuffer
+from drl_continuous.agents.networks import Actor, Critic, SquashedGaussianActor
 
 # Seed
-SEED = 13
+SEED = 111
 torch.manual_seed(SEED)
+torch.random.manual_seed(SEED)
 np.random.seed(SEED)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class TD3:
+class SAC:
     def __init__(
         self,
         name,
         env: gym.Env,
         window=100,
-        polyak=1.0,
-        pi_lr=0.0001,
-        q_lr=0.0001,
+        polyak=0.995,
+        pi_lr=0.0005,
+        q_lr=0.0005,
         target_update_freq=2,
         value_update_freq=1,
+        policy_update_freq=2,
+        alpha=0.1,
         eps=1.0,
         eps_decay=0.99,
-        batch_size=64,
+        batch_size=32,
         gamma=0.99,
         max_episodes=200,
-        reward_threshold=100,
-        target_noise=0.2,
-        noise_clip=0.3,
-        policy_update_freq=2,
     ):
 
         # Hyperparameters
@@ -49,16 +49,14 @@ class TD3:
         self.pi_lr = pi_lr
         self.q_lr = q_lr
         self.target_update_freq = target_update_freq
-        self.policy_update_freq = policy_update_freq
         self.value_update_freq = value_update_freq
+        self.policy_update_freq = policy_update_freq
+        self.alpha = alpha
         self.eps = eps
         self.eps_decay = eps_decay
         self.batch_size = batch_size
         self.gamma = gamma
         self.max_episodes = max_episodes
-        self.reward_threshold = reward_threshold
-        self.target_noise = target_noise
-        self.noise_clip = noise_clip
 
         # env params for networks and buffer
         observation = env.reset()[0]
@@ -70,7 +68,9 @@ class TD3:
         }
 
         # Networks
-        self.actor: Actor = Actor(self.env_params).to(device)
+        self.actor: SquashedGaussianActor = SquashedGaussianActor(
+            self.env_params
+        ).to(device)
         self.critic1: Critic = Critic(self.env_params).to(device)
         self.critic2: Critic = Critic(self.env_params).to(device)
 
@@ -103,155 +103,145 @@ class TD3:
         self.start_steps = batch_size
 
     def train(self):
-
-        print("Training...")
-
         # Life stats
         self.ep = 1
         self.training = True
         self.rewards = deque(maxlen=self.window)
-        self.losses = deque(maxlen=self.window)
 
         # Populating the experience replay memory
-        self.populate_buffer()
+        self.memory.populate(self.env, self.start_steps)
 
-        while self.training:
+        with tqdm(total=self.max_episodes) as pbar:
+            for _ in range(self.max_episodes):
+                # ep stats
+                self.num_steps = 0
+                self.ep_reward = 0
 
-            # ep stats
-            num_steps = 0
-            self.ep_reward = 0
-            self.ep_mean_value_loss = 0.0
+                # ep termination
+                done = False
 
-            # ep termination
-            done = False
+                # starting point
+                observation = self.env.reset()[0]
 
-            # starting point
-            observation = self.env.reset()[0]
+                while not done:
+                    new_observation, done, info = self.interaction_step(
+                        observation
+                    )
+                    self.learning_step()
+                    observation = new_observation
+                    self.num_steps += 1
 
-            while not done:
-                new_observation, done = self.interaction_step(observation)
-                self.learning_step(num_steps)
-                observation = new_observation
-                num_steps += 1
+                self.episode_update(pbar, info)
+                if self.ep % 200 == 0:
+                    self.save()
 
-            self.episode_update()
-
-    def interaction_step(self, observation):
-        action = self.select_action(observation, noise_weight=self.eps)
-        new_observation, reward, terminated, truncated, _ = self.env.step(
-            action
+    def interaction_step(self, observation: np.ndarray) -> tuple:
+        """
+        Function responsible for the interaction of the agent with the
+        environment. The action is selected by the policy network, then
+        performed and the results stored in the replay buffer. It expects a
+        numpy array as input.
+        """
+        observation = torch.as_tensor(observation, dtype=torch.float32).to(
+            device
+        )
+        action = self.select_action(observation).to(device)
+        new_observation, reward, terminated, truncated, info = self.env.step(
+            action.cpu().numpy()
         )
         done = terminated or truncated
-        # Storing in the memory
+        new_observation = torch.as_tensor(
+            new_observation, dtype=torch.float32
+        ).to(
+            device
+        )  # buffer expects tensor
         self.memory.store(observation, action, reward, done, new_observation)
-        # stats
         self.ep_reward += reward
-        return new_observation, done
+        return new_observation, done, info
 
-    def select_action(self, observation, noise_weight=0.2):
+    def select_action(self, observation: torch.Tensor) -> torch.Tensor:
+        """
+        This function selects an action from the policy network. It expects
+        to receive a tensor in input.
+        """
         with torch.no_grad():
-            action = self.actor(
-                torch.as_tensor(observation, dtype=torch.float32)
-            )
-            action += noise_weight * np.random.randn(
-                self.env_params["action_dim"]
-            )
-            action = np.clip(
-                action,
-                -self.env_params["action_bound"],
-                self.env_params["action_bound"],
-            )
+            action, _ = self.actor(observation, with_logprob=False)
         return action
 
-    def estimate_best_actions(self, observations):
-        """
-        Estimate the best actions for given observations using the target actor
-        network with added noise for policy smoothing.
-
-        Args:
-            observations (numpy.ndarray or torch.Tensor): The input observations
-            for which to estimate actions.
-        Returns:
-            torch.Tensor: The estimated best actions with added noise, clipped
-            to the action bounds.
-        """
-        with torch.no_grad():
-            actions: torch.Tensor = self.target_actor(
-                torch.as_tensor(observations, dtype=torch.float32)
-            )
-            noise: torch.Tensor = torch.normal(
-                0, self.target_noise, size=actions.shape
-            )
-            noise = torch.clip(noise, -self.noise_clip, self.noise_clip)
-            actions = torch.clip(
-                actions + noise,
-                -self.env_params["action_bound"],
-                self.env_params["action_bound"],
-            )
-        return actions
-
-    def learning_step(self, num_steps):
+    def learning_step(self) -> bool:
         # Sampling of the minibatch
         batch = self.memory.sample(batch_size=self.batch_size)
-        if num_steps % self.value_update_freq == 0:
+
+        # Learning step
+        if self.num_steps % self.value_update_freq == 0:
             self.value_learning_step(batch)
-        if num_steps % self.policy_update_freq == 0:
+        if self.num_steps % self.policy_update_freq == 0:
             self.policy_learning_step(batch)
-        if num_steps % self.target_update_freq == 0:
+        if self.num_steps % self.target_update_freq == 0:
             self.update_target_networks()
 
     def value_learning_step(self, batch):
         observations, actions, rewards, dones, new_observations = batch
 
+        self.value_optimizer1.zero_grad()
+        self.value_optimizer2.zero_grad()
+
+        # Computation of value estimates
+        value_estimates1 = self.critic1(observations, actions)
+        value_estimates2 = self.critic2(observations, actions)
+
         # Computation of value targets
         with torch.no_grad():
-            best_actions = self.estimate_best_actions(
+            actions, log_pi = self.actor(
                 new_observations
             )  # (batch_size, action_dim)
+            log_pi = log_pi.unsqueeze(1)  # hotfix
             target_values = torch.min(
-                self.target_critic1(new_observations, best_actions),
-                self.target_critic2(new_observations, best_actions),
+                self.target_critic1(new_observations, actions),
+                self.target_critic2(new_observations, actions),
             )
-            targets = rewards + (1 - dones) * self.gamma * target_values
+            targets = rewards + (1 - dones) * self.gamma * (
+                target_values - self.alpha * log_pi
+            )
 
-        estimations1 = self.critic1(observations, actions)
-        estimations2 = self.critic2(observations, actions)
-        value_loss1: torch.Tensor = self.value_loss_fn(estimations1, targets)
-        value_loss2: torch.Tensor = self.value_loss_fn(estimations2, targets)
-
-        self.ep_mean_value_loss += (1 / self.ep) * (
-            value_loss1.item() - self.ep_mean_value_loss
+        # MSBE
+        value_loss1: torch.Tensor = self.value_loss_fn(
+            value_estimates1, targets
         )
-
-        self.value_optimizer1.zero_grad()
+        value_loss2: torch.Tensor = self.value_loss_fn(
+            value_estimates2, targets
+        )
         value_loss1.backward()
         self.value_optimizer1.step()
-
-        self.value_optimizer2.zero_grad()
         value_loss2.backward()
         self.value_optimizer2.step()
 
     def policy_learning_step(self, batch):
         observations, _, _, _, _ = batch
+        self.policy_optimizer.zero_grad()
 
         # Don't waste computational effort
         for param in self.critic1.parameters():
             param.requires_grad = False
+        for param in self.critic2.parameters():
+            param.requires_grad = False
 
         # Policy Optimization
-        estimated_actions = self.actor(observations)
-        estimated_values: torch.Tensor = self.critic1(
-            observations, estimated_actions
+        estimated_actions, log_pi = self.actor(observations)
+        estimated_values: torch.Tensor = torch.min(
+            self.critic1(observations, estimated_actions),
+            self.critic2(observations, estimated_actions),
         )
         policy_loss: torch.Tensor = (
-            -estimated_values.mean()
-        )  # perform gradient ascent
-        self.policy_optimizer.zero_grad()
+            self.alpha * log_pi - estimated_values
+        ).mean()  # perform gradient ascent
         policy_loss.backward()
         self.policy_optimizer.step()
 
         # Reactivate computational graph for critic
         for param in self.critic1.parameters():
+            param.requires_grad = True
+        for param in self.critic2.parameters():
             param.requires_grad = True
 
     def update_target_networks(self, polyak=None):
@@ -275,21 +265,17 @@ class TD3:
                 target.data.mul(polyak)
                 target.data.add((1 - polyak) * online.data)
 
-    def episode_update(self):
+    def episode_update(self, pbar: tqdm = None, info: dict = None):
         self.eps = max(0.1, self.eps * self.eps_decay)
         self.rewards.append(self.ep_reward)
-        self.losses.append(self.ep_mean_value_loss)
         meanreward = np.mean(self.rewards)
-        meanloss = np.mean(self.losses)
-        print(
-            f"\rEpisode {self.ep} Mean Reward: {meanreward:.2f} Ep_Reward: {self.ep_reward} Mean Loss: {meanloss:.2f}\t\t"
-        )
-        if self.ep >= self.max_episodes:
-            self.training = False
-            print("\nEpisode limit reached")
-        if meanreward >= self.reward_threshold:
-            self.training = False
-            print("\nSUCCESS!")
+        wandb.log({"reward": self.ep_reward, "mean_reward": meanreward})
+
+        if pbar is not None:
+            pbar.set_description(
+                f"Episode {self.ep} Mean Reward: {meanreward:.2f} Ep_Reward: {self.ep_reward:.2f} Termination: {info['log']}"
+            )
+            pbar.update(1)
         self.ep += 1
 
     def evaluate(self, env=None, render: bool = True, num_ep=3):
@@ -308,9 +294,12 @@ class TD3:
             total_reward = 0
 
             while not terminated and not truncated:
-                action = self.select_action(observation, noise_weight=0)
+                with torch.no_grad():
+                    action, _ = self.actor(
+                        observation, deterministic=True, with_logprob=False
+                    )
                 observation, reward, terminated, truncated, _ = env.step(
-                    action
+                    action.cpu().numpy()
                 )
                 observation = torch.FloatTensor(observation)
                 total_reward += reward
@@ -324,22 +313,6 @@ class TD3:
         if render:
             print("Mean Reward: ", mean_reward)
         return mean_reward
-
-    def populate_buffer(self):
-        observation = self.env.reset()[0]
-        for _ in range(self.start_steps):
-            with torch.no_grad():
-                action = self.select_action(observation, noise_weight=1)
-            new_observation, reward, terminated, truncated, _ = self.env.step(
-                action
-            )
-            done = terminated or truncated
-            self.memory.store(
-                observation, action, reward, done, new_observation
-            )
-            observation = new_observation
-            if terminated or truncated:
-                observation = self.env.reset()[0]
 
     def save(self):
         here = os.path.dirname(os.path.abspath(__file__))
@@ -366,17 +339,23 @@ class TD3:
 
         self.actor.load_state_dict(
             torch.load(
-                open(os.path.join(path, "actor.pt"), "rb"), weights_only=True
+                open(os.path.join(path, "actor.pt"), "rb"),
+                weights_only=True,
+                map_location=device,
             )
         )
         self.critic1.load_state_dict(
             torch.load(
-                open(os.path.join(path, "critic1.pt"), "rb"), weights_only=True
+                open(os.path.join(path, "critic1.pt"), "rb"),
+                weights_only=True,
+                map_location=device,
             )
         )
         self.critic2.load_state_dict(
             torch.load(
-                open(os.path.join(path, "critic2.pt"), "rb"), weights_only=True
+                open(os.path.join(path, "critic2.pt"), "rb"),
+                weights_only=True,
+                map_location=device,
             )
         )
         print("MODELS LOADED!")

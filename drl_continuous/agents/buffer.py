@@ -2,13 +2,9 @@ import random
 from typing import List
 
 import gymnasium as gym
-import numpy as np
 import torch
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-random.seed(123)
-np.random.seed(123)
 
 
 class StandardReplayBuffer:
