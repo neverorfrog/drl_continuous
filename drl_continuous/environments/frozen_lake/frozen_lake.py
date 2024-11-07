@@ -8,48 +8,11 @@ from gymnasium.spaces import Box
 from pygame.image import load
 from pygame.transform import scale
 
+from drl_continuous.environments.frozen_lake.maps import MAPS
 from drl_continuous.utils import IMG_DIR, Q_DIR, parse_map_grid
 from drl_continuous.utils.definitions import RewardType
 
 SEED = 111
-
-MAPS = {
-    "lab0": [
-        "🟩 🟩 🟩 🟩 1",
-        "🟩 ⛔ 🟩 🟩 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩 ",
-    ],
-    "lab1": [
-        "🟩 🟩 🟩 ⛔ 1",
-        "🟩 ⛔ 🟩 🟩 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩 ",
-    ],
-    "lab2": [
-        "🟩 🟩 🟩 ⛔ 1",
-        "🟩 ⛔ 🟩 ⛔ 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩 ",
-    ],
-    "lab3": [
-        "🟩 🟩 🟩 ⛔ 1",
-        "🟩 ⛔ 🟩 ⛔ 🟩",
-        "🟩 ⛔ 🟩 ⛔ 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩 ",
-    ],
-    "lab4": [
-        "🟩 🟩 🟩 ⛔ 1",
-        "🟩 ⛔ 🟩 ⛔ 🟩",
-        "🟩 ⛔ 🟩 ⛔ 🟩",
-        "🟩 ⛔ 🟩 ⛔ 🟩",
-        "🟩 ⛔ 🟩 🟩 🟩 ",
-    ],
-}
 
 
 class ContinuousFrozenLake(Env):
@@ -99,7 +62,7 @@ class ContinuousFrozenLake(Env):
         self._cell_size = 100
         self.is_pygame_initialized = False
         if self.is_rendered:
-            self.init_pygame()
+            self.init_render()
 
         self.complete_Q = np.load(f"{Q_DIR}/q_tables_{map_name}.npz")[
             "q_table_a1"
@@ -108,7 +71,7 @@ class ContinuousFrozenLake(Env):
 
     def reward_function(self, obs: np.ndarray) -> Tuple[float, bool]:
         terminated = False
-        reward = 0
+        reward = -1
         log = None
 
         if self.reward_type == RewardType.dense:
@@ -122,12 +85,12 @@ class ContinuousFrozenLake(Env):
         if self.num_steps >= self._max_episode_steps:
             log = "MAX STEPS"
             terminated = True
-            reward = -50
+            reward = -100
 
         # Check for successful termination
         if self.is_inside_cell(obs, self.goal):
             log = "GOAL REACHED"
-            reward = 100
+            reward = 1000
             self.old_goal = self.goal
             self.goal_idx += 1
             if self.goal_idx == self.num_goals:
@@ -141,7 +104,7 @@ class ContinuousFrozenLake(Env):
         for hole in self.holes:
             if self.is_inside_cell(obs, hole):
                 terminated = True
-                reward = -10
+                reward = -200
                 log = "HOLE"
                 break
 
@@ -185,17 +148,21 @@ class ContinuousFrozenLake(Env):
         Check if a position is inside a cell.
         """
         cell_coord = self.grid2frame(cell)
-        # inside = True
-        # if pos[0] < cell_coord[0] - 0.5: inside = False # left
-        # if pos[0] > cell_coord[0] + 0.5: inside = False # right
-        # if pos[1] < cell_coord[1] - 0.5: inside = False # bottom
-        # if pos[1] > cell_coord[1] + 0.5: inside = False # top
-
+        inside = True
+        if pos[0] < cell_coord[0] - 0.5:
+            inside = False  # left
+        if pos[0] > cell_coord[0] + 0.5:
+            inside = False  # right
+        if pos[1] < cell_coord[1] - 0.5:
+            inside = False  # bottom
+        if pos[1] > cell_coord[1] + 0.5:
+            inside = False  # top
+        return inside
         # if inside is True:
         #     print(pos, cell_coord, cell)
         #     print(inside)
         #     print("---")
-        return np.linalg.norm(pos - cell_coord) < 0.5
+        # return np.linalg.norm(pos - cell_coord) < 0.5
 
     def frame2grid(self, frame_pos: np.ndarray) -> np.ndarray:
         """
@@ -230,7 +197,7 @@ class ContinuousFrozenLake(Env):
             obs (np.ndarray): The observation to render.
         """
         if not self.is_pygame_initialized and self.is_rendered:
-            self.init_pygame()
+            self.init_render()
             self.is_pygame_initialized = True
         for x in range(0, self.screen_width, self._cell_size):
             for y in range(0, self.screen_height, self._cell_size):
@@ -275,9 +242,9 @@ class ContinuousFrozenLake(Env):
 
         pygame.event.pump()
         pygame.display.update()
-        self.clock.tick(60)
+        self.clock.tick(20)
 
-    def init_pygame(self):
+    def init_render(self):
         """
         Initialize the Pygame environment.
         """
@@ -318,3 +285,9 @@ class ContinuousFrozenLake(Env):
         self.goal_img = scale(
             load(goal_img_path), (self._cell_size // 3, self._cell_size // 3)
         )
+
+    def quit_render(self):
+        """
+        Quit the Pygame environment.
+        """
+        pygame.quit()

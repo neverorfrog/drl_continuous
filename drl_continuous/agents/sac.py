@@ -28,15 +28,15 @@ class SAC:
         env: gym.Env,
         window=100,
         polyak=0.995,
-        pi_lr=0.0005,
-        q_lr=0.0005,
+        pi_lr=0.001,
+        q_lr=0.001,
         target_update_freq=2,
         value_update_freq=1,
         policy_update_freq=2,
-        alpha=0.1,
+        alpha=0.5,
         eps=1.0,
-        eps_decay=0.99,
-        batch_size=32,
+        eps_decay=0.4,
+        batch_size=64,
         gamma=0.99,
         max_episodes=200,
     ):
@@ -57,6 +57,8 @@ class SAC:
         self.batch_size = batch_size
         self.gamma = gamma
         self.max_episodes = max_episodes
+
+        self.min_alpha = 0.2
 
         # env params for networks and buffer
         observation = env.reset()[0]
@@ -171,6 +173,9 @@ class SAC:
     def learning_step(self) -> bool:
         # Sampling of the minibatch
         batch = self.memory.sample(batch_size=self.batch_size)
+        self.alpha = max(
+            self.min_alpha, 0.999 * self.alpha
+        )  # alpha discounting
 
         # Learning step
         if self.num_steps % self.value_update_freq == 0:
