@@ -12,7 +12,7 @@ from drl_continuous.environments.frozen_lake.maps import MAPS
 from drl_continuous.utils import IMG_DIR, Q_DIR, parse_map_grid
 from drl_continuous.utils.definitions import RewardType
 
-SEED = 111
+SEED = 13
 
 
 class ContinuousFrozenLake(Env):
@@ -32,65 +32,67 @@ class ContinuousFrozenLake(Env):
     prev_observation: np.ndarray
     prev_action: np.ndarray
     num_steps: int
+    trajectory: list
 
     def __init__(
         self,
         map_name: str = "6x6",
         reward_type: RewardType = RewardType.dense,
-        is_slippery: bool = True,
-        is_rendered: bool = True,
+        is_slippery: bool = False,
+        is_rendered: bool = False,
     ):
+        self.map_name = map_name
         self.reward_type = reward_type
         self.is_slippery = is_slippery
         self.is_rendered = is_rendered
 
+        # Grid Topology
         self.size, self.holes, self.goals = parse_map_grid(MAPS[map_name])
         self.num_goals = len(self.goals)
+        self.grid_height = self.size
+        self.grid_width = self.size
+        self._cell_size = 100
 
+        # Environment parameters
         self.goal_idx = 0
         self.old_goal = np.array(list(self.goals.values())[0])
         self.goal = np.array(list(self.goals.values())[0])
         self.observation_space = Box(low=0, high=self.size, shape=(2,))
         self.action_space = Box(low=-0.5, high=0.5, shape=(2,))
 
+        # Reward related stuff
         self.max_distance = np.linalg.norm(np.array([self.size, self.size]))
         self.reward_range = Box(low=-self.max_distance, high=0, shape=(1,))
         self._max_episode_steps = 100
 
-        self.grid_height = self.size
-        self.grid_width = self.size
-        self._cell_size = 100
+        # Rendering stuff
         self.is_pygame_initialized = False
+        self.trajectory = []
         if self.is_rendered:
             self.init_render()
 
-        self.complete_Q = np.load(f"{Q_DIR}/q_tables_{map_name}.npz")[
-            "q_table_a1"
-        ]
-        self.Q = self.complete_Q[self.goal_idx :: 2, :]
+        # Load Q-table
+        if self.reward_type == RewardType.model:
+            self.values = self.load_values()
 
     def reward_function(self, obs: np.ndarray) -> Tuple[float, bool]:
         terminated = False
-        reward = -1
+        truncated = False
+        reward = 0
         log = None
 
         if self.reward_type == RewardType.dense:
             goal_distance = np.linalg.norm(obs - self.grid2frame(self.goal))
-            reward = 1 - goal_distance / self.max_distance
+            reward += -goal_distance
         elif self.reward_type == RewardType.model:
-            cell = np.floor(self.frame2grid(obs)).astype(int)
-            state = cell[1] * self.size + cell[0]
-            reward = np.max(self.Q[state, :])
-
-        if self.num_steps >= self._max_episode_steps:
-            log = "MAX STEPS"
-            terminated = True
-            reward = -100
+            i, j = self.frame2matrix(obs)
+            reward += self.values[i, j]
 
         # Check for successful termination
         if self.is_inside_cell(obs, self.goal):
             log = "GOAL REACHED"
-            reward = 1000
+            if self.reward_type != RewardType.model:
+                reward += 1000
             self.old_goal = self.goal
             self.goal_idx += 1
             if self.goal_idx == self.num_goals:
@@ -100,15 +102,20 @@ class ContinuousFrozenLake(Env):
                 goal_key = list(self.goals.keys())[self.goal_idx]
                 self.goal = np.array(self.goals[goal_key])
 
+        if self.num_steps >= self._max_episode_steps:
+            terminated = True
+            log = "MAX STEPS REACHED"
+
         # Check for failure termination
         for hole in self.holes:
             if self.is_inside_cell(obs, hole):
-                terminated = True
-                reward = -200
+                truncated = True
+                if self.reward_type != RewardType.model:
+                    reward = -50
                 log = "HOLE"
                 break
 
-        return reward, terminated, log
+        return reward, terminated, truncated, log
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, dict]:
         """
@@ -130,9 +137,24 @@ class ContinuousFrozenLake(Env):
             )
 
         self.observation = np.array([new_x, new_y])
-        self.reward, terminated, log = self.reward_function(self.observation)
+        self.reward, terminated, truncated, log = self.reward_function(
+            self.observation
+        )
+
+        if terminated or truncated:
+            self.trajectory = []
+        else:
+            self.trajectory.append(self.observation)
+
         self.num_steps += 1
-        return self.observation, self.reward, terminated, False, {"log": log}
+
+        return (
+            self.observation,
+            self.reward,
+            terminated,
+            truncated,
+            {"log": log},
+        )
 
     def reset(self) -> Tuple[np.ndarray, dict]:
         super().reset(seed=SEED)
@@ -148,21 +170,36 @@ class ContinuousFrozenLake(Env):
         Check if a position is inside a cell.
         """
         cell_coord = self.grid2frame(cell)
-        inside = True
-        if pos[0] < cell_coord[0] - 0.5:
-            inside = False  # left
-        if pos[0] > cell_coord[0] + 0.5:
-            inside = False  # right
-        if pos[1] < cell_coord[1] - 0.5:
-            inside = False  # bottom
-        if pos[1] > cell_coord[1] + 0.5:
-            inside = False  # top
-        return inside
-        # if inside is True:
-        #     print(pos, cell_coord, cell)
-        #     print(inside)
-        #     print("---")
-        # return np.linalg.norm(pos - cell_coord) < 0.5
+        return np.linalg.norm(pos - cell_coord) < 0.55
+
+    def load_values(self) -> np.ndarray:
+        """
+        Load the Q-table from the file system.
+        TODO: Hardcoded to just 1 state and agent a1
+        """
+        transition_type = (
+            "deterministic" if not self.is_slippery else "stochastic"
+        )
+        q_table: np.ndarray = np.load(
+            f"{Q_DIR}/{transition_type}/q_tables_{self.map_name}.npz"
+        )["q_table_a1"]
+        mean_q_values: np.ndarray = q_table.max(axis=1)
+        reshaped_mean_q_values = mean_q_values.reshape(
+            (self.size, self.size, 2)
+        )
+        return reshaped_mean_q_values[:, :, 0]
+
+    def frame2matrix(self, frame_pos: np.ndarray) -> np.ndarray:
+        """
+        Convert a frame position to a matrix index.
+        """
+        x, y = self.frame2grid(frame_pos)
+
+        # Inverting the coordinates
+        # x actually represents the columns and y the rows
+        indices = np.floor(np.array([y, x])).astype(int)
+
+        return indices
 
     def frame2grid(self, frame_pos: np.ndarray) -> np.ndarray:
         """
@@ -170,9 +207,13 @@ class ContinuousFrozenLake(Env):
         """
         assert len(frame_pos) == 2
         x, y = frame_pos
+
         # Flipping y axis
         y = self.size - y
-        return np.array([x, y])
+
+        cell = np.array([x, y])
+
+        return cell
 
     def grid2frame(self, grid_pos: np.ndarray) -> np.ndarray:
         """
@@ -199,6 +240,8 @@ class ContinuousFrozenLake(Env):
         if not self.is_pygame_initialized and self.is_rendered:
             self.init_render()
             self.is_pygame_initialized = True
+            self.trajectory = []
+
         for x in range(0, self.screen_width, self._cell_size):
             for y in range(0, self.screen_height, self._cell_size):
                 # Draw the ice
@@ -239,6 +282,16 @@ class ContinuousFrozenLake(Env):
         agent_x = x * self._cell_size - self.agent_img.get_width() // 2
         agent_y = y * self._cell_size - self.agent_img.get_height() // 2
         self.screen.blit(self.agent_img, (agent_x, agent_y))
+
+        # Draw the trajectory
+        if self.trajectory:
+            for point in self.trajectory:
+                traj_x, traj_y = self.frame2grid(point)
+                traj_x = traj_x * self._cell_size
+                traj_y = traj_y * self._cell_size
+                pygame.draw.circle(
+                    self.screen, (255, 0, 0), (traj_x, traj_y), 5
+                )
 
         pygame.event.pump()
         pygame.display.update()
