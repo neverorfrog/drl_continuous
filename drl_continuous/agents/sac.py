@@ -59,7 +59,9 @@ class SAC:
         self.max_episodes = max_episodes
 
         # Alpha discounting
-        self.alpha_update = LinearDiscountScheduler(alpha, 0.03, max_episodes)
+        self.alpha_update = ExponentialDiscountScheduler(
+            alpha, 0.03, max_episodes
+        )
 
         # env params for networks and buffer
         observation = env.reset()[0]
