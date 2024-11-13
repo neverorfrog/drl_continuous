@@ -8,7 +8,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class StandardReplayBuffer:
-    def __init__(self, env_params, capacity=512):
+    def __init__(self, env_params, capacity=2048):
         self.env_params = env_params
         self.capacity = capacity
         self.size = 0

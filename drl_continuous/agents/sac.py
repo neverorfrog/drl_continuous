@@ -11,9 +11,13 @@ from tqdm import tqdm
 import wandb
 from drl_continuous.agents.buffer import StandardReplayBuffer
 from drl_continuous.agents.networks import Actor, Critic, SquashedGaussianActor
+from drl_continuous.utils import (
+    ExponentialDiscountScheduler,
+    LinearDiscountScheduler,
+)
 
 # Seed
-SEED = 111
+SEED = 13
 torch.manual_seed(SEED)
 torch.random.manual_seed(SEED)
 np.random.seed(SEED)
@@ -28,16 +32,14 @@ class SAC:
         env: gym.Env,
         window=100,
         polyak=0.995,
-        pi_lr=0.001,
-        q_lr=0.001,
+        pi_lr=0.003,
+        q_lr=0.003,
         target_update_freq=2,
         value_update_freq=1,
         policy_update_freq=2,
-        alpha=0.5,
-        eps=1.0,
-        eps_decay=0.4,
-        batch_size=64,
-        gamma=0.99,
+        alpha=0.25,
+        batch_size=128,
+        gamma=0.8,
         max_episodes=200,
     ):
 
@@ -52,13 +54,12 @@ class SAC:
         self.value_update_freq = value_update_freq
         self.policy_update_freq = policy_update_freq
         self.alpha = alpha
-        self.eps = eps
-        self.eps_decay = eps_decay
         self.batch_size = batch_size
         self.gamma = gamma
         self.max_episodes = max_episodes
 
-        self.min_alpha = 0.2
+        # Alpha discounting
+        self.alpha_update = LinearDiscountScheduler(alpha, 0.03, max_episodes)
 
         # env params for networks and buffer
         observation = env.reset()[0]
@@ -108,13 +109,14 @@ class SAC:
         # Life stats
         self.ep = 1
         self.training = True
-        self.rewards = deque(maxlen=self.window)
+        self.reward_buffer = deque(maxlen=self.window)
+        self.num_steps_buffer = deque(maxlen=self.window)
 
         # Populating the experience replay memory
         self.memory.populate(self.env, self.start_steps)
 
         with tqdm(total=self.max_episodes) as pbar:
-            for _ in range(self.max_episodes):
+            for i in range(self.max_episodes):
                 # ep stats
                 self.num_steps = 0
                 self.ep_reward = 0
@@ -152,6 +154,10 @@ class SAC:
             action.cpu().numpy()
         )
         done = terminated or truncated
+        if (
+            truncated
+        ):  # As if the episode was terminated (fell in a hole for example)
+            self.num_steps = self.env._max_episode_steps
         new_observation = torch.as_tensor(
             new_observation, dtype=torch.float32
         ).to(
@@ -173,9 +179,6 @@ class SAC:
     def learning_step(self) -> bool:
         # Sampling of the minibatch
         batch = self.memory.sample(batch_size=self.batch_size)
-        self.alpha = max(
-            self.min_alpha, 0.999 * self.alpha
-        )  # alpha discounting
 
         # Learning step
         if self.num_steps % self.value_update_freq == 0:
@@ -271,52 +274,61 @@ class SAC:
                 target.data.add((1 - polyak) * online.data)
 
     def episode_update(self, pbar: tqdm = None, info: dict = None):
-        self.eps = max(0.1, self.eps * self.eps_decay)
-        self.rewards.append(self.ep_reward)
-        meanreward = np.mean(self.rewards)
-        wandb.log({"reward": self.ep_reward, "mean_reward": meanreward})
+        self.reward_buffer.append(self.ep_reward)
+        self.num_steps_buffer.append(self.num_steps)
+        mean_num_steps = np.mean(self.num_steps_buffer)
+        mean_reward = np.mean(self.reward_buffer)
+        wandb.log(
+            {
+                "reward": self.ep_reward,
+                "mean_reward": mean_reward,
+                "num_steps": self.num_steps,
+                "mean_num_steps": mean_num_steps,
+            }
+        )
 
         if pbar is not None:
             pbar.set_description(
-                f"Episode {self.ep} Mean Reward: {meanreward:.2f} Ep_Reward: {self.ep_reward:.2f} Termination: {info['log']}"
+                f"Episode {self.ep} Alpha: {self.alpha:.2f} Mean Reward: {mean_reward:.2f} Ep_Reward: {self.ep_reward:.2f} Termination: {info['log']}"
             )
             pbar.update(1)
         self.ep += 1
+        self.alpha = self.alpha_update()
 
     def evaluate(self, env=None, render: bool = True, num_ep=3):
         mean_reward = 0.0
         if env is None:
             env = self.env
 
-        for i in range(1, num_ep + 1):
-            if render:
-                print(f"Starting game {i}")
+        with tqdm(total=num_ep) as pbar:
+            for i in range(num_ep):
+                observation = torch.FloatTensor(env.reset()[0])
 
-            observation = torch.FloatTensor(env.reset()[0])
+                terminated = False
+                truncated = False
+                total_reward = 0
 
-            terminated = False
-            truncated = False
-            total_reward = 0
-
-            while not terminated and not truncated:
-                with torch.no_grad():
-                    action, _ = self.actor(
-                        observation, deterministic=True, with_logprob=False
+                while not terminated and not truncated:
+                    with torch.no_grad():
+                        action, _ = self.actor(
+                            observation, deterministic=True, with_logprob=False
+                        )
+                    observation, reward, terminated, truncated, info = (
+                        env.step(action.cpu().numpy())
                     )
-                observation, reward, terminated, truncated, _ = env.step(
-                    action.cpu().numpy()
+                    observation = torch.FloatTensor(observation)
+                    total_reward += reward
+                    if render:
+                        self.env.render()
+
+                mean_reward = mean_reward + (1 / (i + 1)) * (
+                    total_reward - mean_reward
                 )
-                observation = torch.FloatTensor(observation)
-                total_reward += reward
-                if render:
-                    self.env.render()
+                pbar.set_description(
+                    f"Episode {i+1} Mean Reward: {mean_reward:.2f} Ep_Reward: {total_reward:.2f} Termination: {info['log']}"
+                )
+                pbar.update(1)
 
-            if render:
-                print("\tTotal Reward:", total_reward)
-            mean_reward = mean_reward + (1 / i) * (total_reward - mean_reward)
-
-        if render:
-            print("Mean Reward: ", mean_reward)
         return mean_reward
 
     def save(self):

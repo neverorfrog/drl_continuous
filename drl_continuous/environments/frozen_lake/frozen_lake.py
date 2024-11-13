@@ -103,7 +103,7 @@ class ContinuousFrozenLake(Env):
                 self.goal = np.array(self.goals[goal_key])
 
         if self.num_steps >= self._max_episode_steps:
-            terminated = True
+            truncated = True
             log = "MAX STEPS REACHED"
 
         # Check for failure termination
@@ -170,6 +170,16 @@ class ContinuousFrozenLake(Env):
         Check if a position is inside a cell.
         """
         cell_coord = self.grid2frame(cell)
+        # inside = True
+        # if pos[0] < cell_coord[0] - 0.5:
+        #     inside = False  # left
+        # if pos[0] > cell_coord[0] + 0.5:
+        #     inside = False  # right
+        # if pos[1] < cell_coord[1] - 0.5:
+        #     inside = False  # bottom
+        # if pos[1] > cell_coord[1] + 0.5:
+        #     inside = False  # top
+        # return inside
         return np.linalg.norm(pos - cell_coord) < 0.55
 
     def load_values(self) -> np.ndarray:
